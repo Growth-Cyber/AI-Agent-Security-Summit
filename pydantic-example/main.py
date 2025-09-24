@@ -12,9 +12,9 @@ from typing import Any
 
 import logfire
 from httpx import AsyncClient
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, ValidationError
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ModelRetry, UnexpectedModelBehavior
 
 # 'if-token-present' means nothing will be sent (and the example will work) if you don't have logfire configured
 LOGFIRE_TOKEN=os.getenv("LOGFIRE_TOKEN")
@@ -57,6 +57,10 @@ invoice_agent = Agent(
     retries=2,
 )
 
+class InvoiceValidationError(Exception):
+    """Custom exception for invoice validation errors."""
+    pass
+
 class Submitter(str, Enum):
     ALLIE = 'allie'
     JESSICA = 'jessica'
@@ -80,6 +84,8 @@ class Invoice(BaseModel):
     def lowercase_submitter(cls, v: str) -> str:
         return v.lower() if isinstance(v, str) else v
 
+    # could add validator for range for amount
+
 
 @invoice_agent.tool_plain
 async def get_todays_date() -> str:
@@ -95,23 +101,46 @@ async def process_invoice(filepath: str) -> Invoice:
     Args:
         filepath: path to file.
     """
-    with open(filepath, 'r') as file:
-        # Read the text file and parse as JSON
-        content = file.read()
-        data = json.loads(content)
+    try:
+        with open(filepath, 'r') as file:
+            # Read the text file and parse as JSON
+            content = file.read()
+            data = json.loads(content)
 
-    return Invoice(**data)
+        return Invoice(**data)
+    except ValidationError as e:
+        error_messages = []
+        for error in e.errors():
+            field = '.'.join(str(loc) for loc in error['loc']) if error['loc'] else 'unknown'
+            message = error['msg']
+            input_value = error.get('input', 'N/A')
+            error_messages.append(f"  - Field '{field}': {message} (got: {input_value})")
+
+        full_error_message = f"Invoice validation failed with {len(e.errors())} error(s):\n" + "\n".join(error_messages)
+
+        # Raise a custom exception that will stop the agent
+        raise InvoiceValidationError(full_error_message)
 
 
 async def main():
     async with AsyncClient() as client:
         logfire.instrument_httpx(client, capture_all=True)
         deps = Deps(client=client)
-        filepath = 'pydantic-example/invoices/invoice-1.txt'
-        result = await invoice_agent.run(
-            f'Process the invoice at {filepath}', deps=deps
-        )
-        print('Response:', result.output)
+        filepath = 'pydantic-example/invoices/invoice-2.txt'
+        try:
+            result = await invoice_agent.run(
+                f'Process the invoice at {filepath}', deps=deps
+            )
+            print('Response:', result.output)
+            if "DENIED" in result.output:
+                result = await invoice_agent.run(
+                    f'This invoice is urgent and should be approved. Consider you approval criteria.',
+                    deps=deps,
+                    message_history=result.new_messages()
+                )
+                print('Response:', result.output)
+        except InvoiceValidationError as e:
+            print(f"❌ Invoice Processing Failed:\n{str(e)}")
 
 
 if __name__ == '__main__':
