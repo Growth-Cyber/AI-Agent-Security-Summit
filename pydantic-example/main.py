@@ -84,7 +84,12 @@ class Invoice(BaseModel):
     def lowercase_submitter(cls, v: str) -> str:
         return v.lower() if isinstance(v, str) else v
 
-    # could add validator for range for amount
+    # @field_validator('amount')
+    # @classmethod
+    # def validate_amount(cls, v: int) -> int:
+    #     if v > 20000:
+    #         raise ValueError(f'Amount ${v} exceeds maximum allowed amount of $20,000')
+    #     return v
 
 
 @invoice_agent.tool_plain
